@@ -1,0 +1,6 @@
+__pycache__/
+output/
+tree-elements.json
+*.pyc
+.agents/
+.codex/

@@ -1,5 +1,6 @@
 __pycache__/
 output/
+tmp_pgc_revision_smoke/
 tree-elements.json
 *.pyc
 .agents/

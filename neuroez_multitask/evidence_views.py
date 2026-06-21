@@ -37,6 +37,8 @@ CAUSAL_NODE_FEATURE_NAMES = [
     "mean_delay_in",
 ]
 
+SELF_REFERENCE_PARTS = ("abs", "delta", "zdelta", "ratio")
+
 TOPOLOGY_FEATURE_NAMES = [
     "causal_density_mean",
     "causal_density_std",
@@ -202,15 +204,125 @@ def compute_physics_features(segment: np.ndarray, sfreq: float) -> np.ndarray:
     return np.nan_to_num(out.astype(np.float32), copy=False)
 
 
-def compute_tfccm_graph(segment: np.ndarray, sfreq: float, max_delay_ms: float = 80.0) -> tuple[np.ndarray, np.ndarray]:
+def _baseline_window_mask(window_centers: np.ndarray, num_windows: int) -> np.ndarray:
+    centers = np.asarray(window_centers, dtype=np.float32)
+    pre_mask = centers < 0.0
+    if centers.shape[0] != num_windows or not np.any(pre_mask):
+        pre_mask = np.ones((num_windows,), dtype=bool)
+    return pre_mask
+
+
+def _self_reference_features(
+    window_features: np.ndarray,
+    window_centers: np.ndarray,
+    *,
+    eps: float = 1e-5,
+) -> np.ndarray:
+    features = np.asarray(window_features, dtype=np.float32)
+    if features.ndim != 3:
+        raise ValueError("window_features must be shaped [T, C, F].")
+    if features.shape[0] == 0 or features.shape[-1] == 0:
+        return features.astype(np.float32, copy=False)
+    pre_mask = _baseline_window_mask(window_centers, features.shape[0])
+    baseline = features[pre_mask]
+    pre_mean = baseline.mean(axis=0, keepdims=True)
+    pre_std = np.clip(baseline.std(axis=0, keepdims=True), eps, None)
+    pre_mean_t = np.broadcast_to(pre_mean, features.shape)
+    delta = features - pre_mean_t
+    zdelta = delta / pre_std
+    ratio = np.log((np.abs(features) + eps) / (np.abs(pre_mean_t) + eps))
+    out = np.concatenate([features, delta, zdelta, ratio], axis=-1)
+    return np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32, copy=False)
+
+
+def b0_self_reference_features(window_features: np.ndarray, window_centers: np.ndarray) -> np.ndarray:
+    return _self_reference_features(window_features, window_centers)
+
+
+def physics_self_reference_features(window_features: np.ndarray, window_centers: np.ndarray) -> np.ndarray:
+    return _self_reference_features(window_features, window_centers)
+
+
+def _standardize_channels(data: np.ndarray) -> np.ndarray:
+    centered = data - data.mean(axis=1, keepdims=True)
+    scale = centered.std(axis=1, keepdims=True)
+    return centered / np.clip(scale, 1e-6, None)
+
+
+def _embedding_points(series: np.ndarray, target: np.ndarray, *, lag: int, embedding_dim: int, tau: int) -> tuple[np.ndarray, np.ndarray]:
+    n = int(series.shape[0])
+    start = (embedding_dim - 1) * tau + lag
+    if n - start < embedding_dim + 3:
+        return np.zeros((0, embedding_dim), dtype=np.float32), np.zeros((0,), dtype=np.float32)
+    idx = np.arange(start, n, dtype=np.int64)
+    embedded = np.stack([series[idx - dim * tau] for dim in range(embedding_dim)], axis=1)
+    target_values = target[idx - lag]
+    return embedded.astype(np.float32), target_values.astype(np.float32)
+
+
+def _subsample_rows(points: np.ndarray, target: np.ndarray, max_points: int = 96) -> tuple[np.ndarray, np.ndarray]:
+    if points.shape[0] <= max_points:
+        return points, target
+    keep = np.linspace(0, points.shape[0] - 1, max_points).round().astype(np.int64)
+    return points[keep], target[keep]
+
+
+def _cross_map_skill(
+    manifold_series: np.ndarray,
+    target_series: np.ndarray,
+    *,
+    lag: int,
+    embedding_dim: int,
+    tau: int,
+    library_fraction: float,
+) -> float:
+    points, target = _embedding_points(manifold_series, target_series, lag=lag, embedding_dim=embedding_dim, tau=tau)
+    points, target = _subsample_rows(points, target)
+    n = int(points.shape[0])
+    if n < embedding_dim + 3 or float(np.std(target)) < 1e-6:
+        return 0.0
+    lib_size = max(embedding_dim + 2, int(round(n * library_fraction)))
+    lib_size = min(lib_size, n)
+    library = points[:lib_size]
+    library_target = target[:lib_size]
+    k = min(embedding_dim + 1, max(1, lib_size - 1))
+    preds = np.zeros((n,), dtype=np.float32)
+    for idx in range(n):
+        dist = np.sqrt(np.sum((library - points[idx]) ** 2, axis=1))
+        if idx < lib_size and lib_size > 1:
+            dist[idx] = np.inf
+        nn = np.argpartition(dist, kth=min(k, dist.shape[0] - 1))[:k]
+        finite = np.isfinite(dist[nn])
+        if not np.any(finite):
+            preds[idx] = float(np.mean(library_target))
+            continue
+        nn = nn[finite]
+        d0 = max(float(np.min(dist[nn])), 1e-6)
+        weights = np.exp(-dist[nn] / d0)
+        weights = weights / (float(np.sum(weights)) + 1e-8)
+        preds[idx] = float(np.sum(weights * library_target[nn]))
+    pred_std = float(np.std(preds))
+    target_std = float(np.std(target))
+    if pred_std < 1e-6 or target_std < 1e-6:
+        return 0.0
+    corr = float(np.corrcoef(preds, target)[0, 1])
+    return corr if np.isfinite(corr) else 0.0
+
+
+def compute_tfccm_graph(
+    segment: np.ndarray,
+    sfreq: float,
+    max_delay_ms: float = 80.0,
+    embedding_dim: int = 3,
+    tau: int = 1,
+) -> tuple[np.ndarray, np.ndarray]:
     data = np.asarray(segment, dtype=np.float32)
     channels, samples = data.shape
-    if samples < 4:
+    if samples < max(8, embedding_dim + 4):
         return np.zeros((channels, channels), dtype=np.float32), np.zeros((channels, channels), dtype=np.float32)
     max_lag = max(1, int(round(max_delay_ms * sfreq / 1000.0)))
-    max_lag = min(max_lag, samples // 4)
-    centered = data - data.mean(axis=1, keepdims=True)
-    std = centered.std(axis=1) + 1e-6
+    max_lag = min(max_lag, max(1, samples // 4))
+    normalized = _standardize_channels(data)
     adj = np.zeros((channels, channels), dtype=np.float32)
     delay = np.zeros((channels, channels), dtype=np.float32)
     for src in range(channels):
@@ -220,15 +332,30 @@ def compute_tfccm_graph(segment: np.ndarray, sfreq: float, max_delay_ms: float =
             best = 0.0
             best_lag = 0
             for lag in range(1, max_lag + 1):
-                x = centered[src, :-lag]
-                y = centered[dst, lag:]
-                score = float(np.mean(x * y) / (std[src] * std[dst]))
-                if abs(score) > abs(best):
+                half = _cross_map_skill(
+                    normalized[dst],
+                    normalized[src],
+                    lag=lag,
+                    embedding_dim=embedding_dim,
+                    tau=max(1, int(tau)),
+                    library_fraction=0.5,
+                )
+                full = _cross_map_skill(
+                    normalized[dst],
+                    normalized[src],
+                    lag=lag,
+                    embedding_dim=embedding_dim,
+                    tau=max(1, int(tau)),
+                    library_fraction=1.0,
+                )
+                convergence = max(0.0, full - half)
+                score = max(0.0, full) * (1.0 + convergence)
+                if score > best:
                     best = score
                     best_lag = lag
-            adj[src, dst] = max(best, 0.0)
+            adj[src, dst] = best
             delay[src, dst] = best_lag / max(float(sfreq), 1e-6)
-    return np.nan_to_num(adj, nan=0.0).astype(np.float32), delay.astype(np.float32)
+    return np.nan_to_num(adj, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32), delay.astype(np.float32)
 
 
 def compute_causal_node_features(adjacency: np.ndarray, delay: np.ndarray) -> np.ndarray:

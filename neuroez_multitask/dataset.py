@@ -6,11 +6,22 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from .normalization import MultiViewNormalizer, prepare_multiview_sample
+
 
 class PhysicsCacheDataset(Dataset):
-    def __init__(self, cache_payload: dict[str, Any], subject_ids: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        cache_payload: dict[str, Any],
+        subject_ids: set[str] | None = None,
+        *,
+        normalizer: MultiViewNormalizer | None = None,
+        prepare_features: bool = True,
+    ) -> None:
         self.patient_index = cache_payload["patient_index"]
         self.outcome_index = cache_payload.get("outcome_index", {})
+        self.normalizer = normalizer
+        self.prepare_features = prepare_features
         by_subject: dict[str, list[dict[str, Any]]] = {}
         for record in cache_payload["run_records"]:
             sid = str(record["subject_id"])
@@ -27,7 +38,7 @@ class PhysicsCacheDataset(Dataset):
         sid = self.subject_ids[index]
         patient = self.patient_index[sid]
         outcome = self.outcome_index.get(sid, {})
-        runs = self.by_subject[sid]
+        runs = [self._prepare_run(run) for run in self.by_subject[sid]]
         return {
             "subject_id": sid,
             "center": patient.get("center", ""),
@@ -42,6 +53,18 @@ class PhysicsCacheDataset(Dataset):
             "topology_features": _patient_topology(runs),
         }
 
+    def _prepare_run(self, run: dict[str, Any]) -> dict[str, Any]:
+        sample = run["sample"]
+        if self.prepare_features:
+            sample = self.normalizer.transform_sample(sample) if self.normalizer is not None else prepare_multiview_sample(sample)
+        local_names = _run_channel_names(run, sample)
+        sample = dict(sample)
+        sample["channel_names"] = local_names
+        out = dict(run)
+        out["sample"] = sample
+        out["channel_names"] = local_names
+        return out
+
 
 def _patient_topology(runs: Sequence[dict[str, Any]]) -> np.ndarray:
     values = []
@@ -52,6 +75,22 @@ def _patient_topology(runs: Sequence[dict[str, Any]]) -> np.ndarray:
     if not values:
         return np.zeros((8,), dtype=np.float32)
     return np.mean(np.stack(values, axis=0), axis=0).astype(np.float32)
+
+
+def _run_channel_names(run: dict[str, Any], sample: dict[str, Any]) -> list[str]:
+    for key in ("channel_names", "channel_names_norm", "canonical_channels"):
+        if key in sample:
+            return [str(name) for name in sample[key]]
+        if key in run:
+            return [str(name) for name in run[key]]
+    return []
+
+
+def _channel_index_map(canonical_channels: Sequence[str], local_channels: Sequence[str], local_count: int) -> list[int | None]:
+    canonical_to_idx = {str(name): idx for idx, name in enumerate(canonical_channels)}
+    if not local_channels:
+        return list(range(min(len(canonical_channels), local_count))) + [None] * max(0, local_count - len(canonical_channels))
+    return [canonical_to_idx.get(str(name)) for name in list(local_channels)[:local_count]]
 
 
 def collate_patient_batch(batch: Sequence[dict[str, Any]]) -> dict[str, Any]:
@@ -98,13 +137,21 @@ def collate_patient_batch(batch: Sequence[dict[str, Any]]) -> dict[str, Any]:
             cn = np.asarray(sample["causal_node_features"], dtype=np.float32)
             wm = np.asarray(sample["window_mask"], dtype=bool)
             t = wf.shape[0]
-            b0[bidx, sidx, :t, :c] = torch.as_tensor(wf)
-            phys[bidx, sidx, :t, :c] = torch.as_tensor(pf)
-            adj[bidx, sidx, :t, :c, :c] = torch.as_tensor(ca)
-            delay[bidx, sidx, :t, :c, :c] = torch.as_tensor(cd)
-            causal[bidx, sidx, :t, :c] = torch.as_tensor(cn)
+            local_count = int(wf.shape[1])
+            local_to_patient = _channel_index_map(item["channel_names"], _run_channel_names(run, sample), local_count)
+            for local_i, patient_i in enumerate(local_to_patient):
+                if patient_i is None or patient_i >= c:
+                    continue
+                b0[bidx, sidx, :t, patient_i] = torch.as_tensor(wf[:, local_i, :])
+                phys[bidx, sidx, :t, patient_i] = torch.as_tensor(pf[:, local_i, :])
+                causal[bidx, sidx, :t, patient_i] = torch.as_tensor(cn[:, local_i, :])
+                seizure_channel_mask[bidx, sidx, patient_i] = True
+                for local_j, patient_j in enumerate(local_to_patient):
+                    if patient_j is None or patient_j >= c:
+                        continue
+                    adj[bidx, sidx, :t, patient_i, patient_j] = torch.as_tensor(ca[:, local_i, local_j])
+                    delay[bidx, sidx, :t, patient_i, patient_j] = torch.as_tensor(cd[:, local_i, local_j])
             seizure_mask[bidx, sidx] = True
-            seizure_channel_mask[bidx, sidx, :c] = True
             window_mask[bidx, sidx, :t] = torch.as_tensor(wm, dtype=torch.bool)
 
     return {

@@ -84,6 +84,7 @@ def build_run_sample(
     tfccm_max_delay_ms: float = 80.0,
 ) -> dict[str, np.ndarray]:
     signal = np.asarray(_get(seizure, "signal"), dtype=np.float32)
+    channel_names = [str(name) for name in _get(seizure, "channel_names", [])]
     sfreq = float(_get(seizure, "sfreq"))
     onset_sec = float(_get(seizure, "seizure_onset_sec", _get(seizure, "onset_sec", 0.0)))
     windows, centers, window_mask = extract_onset_windows(signal, sfreq=sfreq, onset_sec=onset_sec, config=config)
@@ -116,6 +117,7 @@ def build_run_sample(
         "topology_graph_features": compute_topology_features(adjacency, centers),
         "window_relative_centers_sec": centers.astype(np.float32),
         "window_mask": window_mask.astype(bool),
+        "channel_names": channel_names,
     }
 
 
@@ -206,7 +208,14 @@ def build_cache_payload(
             "window_step_sec": float(window_step_sec),
             "pre_onset_sec": float(pre_onset_sec),
             "post_onset_sec": float(post_onset_sec),
-            "tfccm_params": {"max_delay_ms": float(tfccm_max_delay_ms), "fixed_for_all_patients": True},
+            "tfccm_params": {
+                "method": "time_delay_embedding_cross_map",
+                "embedding_dim": 3,
+                "tau_samples": 1,
+                "library_fractions": [0.5, 1.0],
+                "max_delay_ms": float(tfccm_max_delay_ms),
+                "fixed_for_all_patients": True,
+            },
             "created_at": datetime.now(timezone.utc).isoformat(),
             "source_patient_records_pkl": source_patient_records_pkl,
             "input_label_semantics": input_label_semantics,

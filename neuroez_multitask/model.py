@@ -23,6 +23,7 @@ class PGCSEEGModel(nn.Module):
         use_delay: bool = True,
         directed_graph: bool = True,
         random_graph: bool = False,
+        random_graph_mode: str = "weight",
         fusion_type: str = "gated",
         outcome_readout_type: str = "attention",
         use_topology_features: bool = True,
@@ -40,6 +41,7 @@ class PGCSEEGModel(nn.Module):
             use_delay=use_delay,
             directed_graph=directed_graph,
             random_graph=random_graph,
+            random_graph_mode=random_graph_mode,
         )
         self.causal_node_projection = nn.LazyLinear(model_dim)
         self.causal_node_gate = nn.Sequential(nn.Linear(model_dim * 2, model_dim), nn.GELU(), nn.Linear(model_dim, model_dim))

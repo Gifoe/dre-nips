@@ -11,12 +11,13 @@ import torch
 from torch.utils.data import DataLoader
 
 from neuroez_multitask.dataset import PhysicsCacheDataset, collate_patient_batch
+from neuroez_multitask.experiments import model_kwargs_for_experiment
 from neuroez_multitask.metrics import summarize_task2_predictions
 from neuroez_multitask.model import PGCSEEGModel
 from neuroez_multitask.normalization import fit_multiview_normalizer
-from neuroez_multitask.splits import make_patient_splits
+from neuroez_multitask.splits import PatientSplit, make_patient_splits
 from neuroez_multitask.train_task2 import estimate_task2_pos_weight, task2_loss
-from run_task1_pgc_ez import _checkpoint_state_dict, _model_kwargs
+from run_task1_pgc_ez import _checkpoint_state_dict, _write_split_metadata
 
 
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -38,6 +39,64 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 def _freeze_backbone(model: PGCSEEGModel) -> None:
     for name, param in model.named_parameters():
         param.requires_grad = name.startswith("outcome_head")
+
+
+def _torch_load_payload(path: Path, device: torch.device) -> Any:
+    try:
+        return torch.load(path, map_location=device, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=device)
+
+
+def _load_fold_task1_payload(
+    *,
+    checkpoint_dir: Path | None,
+    single_checkpoint: Path | None,
+    allow_external: bool,
+    split: PatientSplit,
+    device: torch.device,
+) -> dict[str, Any] | None:
+    if checkpoint_dir is not None:
+        fold_ckpt = checkpoint_dir / f"fold_{split.fold}" / "best_task1_backbone.pt"
+        if not fold_ckpt.exists():
+            raise FileNotFoundError(f"Missing fold-specific Task1 checkpoint: {fold_ckpt}")
+        payload = _torch_load_payload(fold_ckpt, device)
+        if not isinstance(payload, dict):
+            payload = {"model_state_dict": payload, "checkpoint_scope": "legacy_fold_specific"}
+
+        task1_train = set(map(str, payload.get("train_subjects", [])))
+        task1_test = set(map(str, payload.get("test_subjects", [])))
+        task2_test = set(map(str, split.test_subjects))
+        leakage = task1_train & task2_test
+        if leakage:
+            raise RuntimeError(
+                "Task1 checkpoint leakage detected. "
+                f"Task2 test subjects appear in Task1 train subjects: {sorted(leakage)}"
+            )
+        if task1_test and task1_test != task2_test:
+            raise RuntimeError(
+                "Task1 and Task2 folds are not aligned. "
+                f"Task1 test={sorted(task1_test)}, Task2 test={sorted(task2_test)}"
+            )
+        if payload.get("safe_for_task2_fold_loading") is False:
+            raise RuntimeError("This Task1 checkpoint is marked unsafe for Task2 fold loading.")
+        return payload
+
+    if single_checkpoint is not None:
+        if not allow_external:
+            raise RuntimeError(
+                "Single --task1_checkpoint is unsafe for fold evaluation. "
+                "Use --task1_checkpoint_dir with fold-specific checkpoints. "
+                "Use --allow_external_task1_checkpoint only for external-cohort pretraining/debug."
+            )
+        if not single_checkpoint.exists():
+            raise FileNotFoundError(f"Missing Task1 checkpoint: {single_checkpoint}")
+        payload = _torch_load_payload(single_checkpoint, device)
+        if isinstance(payload, dict):
+            return payload
+        return {"model_state_dict": payload, "checkpoint_scope": "external_or_debug"}
+
+    return None
 
 
 def _evaluate(model: PGCSEEGModel, loader: DataLoader, device: torch.device, fold: int, cache: dict[str, Any]) -> tuple[dict[str, float], list[dict[str, Any]]]:
@@ -79,6 +138,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Train Task2 PGC-SEEG outcome model.")
     parser.add_argument("--window_cache_path", type=Path, required=True)
     parser.add_argument("--task1_checkpoint", type=Path, default=None)
+    parser.add_argument("--task1_checkpoint_dir", type=Path, default=None)
+    parser.add_argument("--allow_external_task1_checkpoint", action="store_true")
     parser.add_argument("--experiment_name", type=str, default="T2_FULL_ATTENTION_TOPOLOGY")
     parser.add_argument("--output_dir", type=Path, required=True)
     parser.add_argument("--split_strategy", type=str, default="5fold")
@@ -97,24 +158,35 @@ def main() -> None:
     with open(args.window_cache_path, "rb") as fin:
         cache = pickle.load(fin)
     splits = make_patient_splits(cache["patient_index"], strategy=args.split_strategy, n_splits=args.n_splits, seed=args.seed)
+    _write_split_metadata(args.output_dir, splits)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     fold_rows = []
     pred_rows: list[dict[str, Any]] = []
     best_state = None
     best_score = -1.0
     for split in splits:
+        task1_payload = _load_fold_task1_payload(
+            checkpoint_dir=args.task1_checkpoint_dir,
+            single_checkpoint=args.task1_checkpoint,
+            allow_external=args.allow_external_task1_checkpoint,
+            split=split,
+            device=device,
+        )
         raw_train_ds = PhysicsCacheDataset(cache, set(split.train_subjects))
-        normalizer = fit_multiview_normalizer(raw_train_ds)
+        if task1_payload is not None and task1_payload.get("normalizer") is not None:
+            normalizer = task1_payload["normalizer"]
+        else:
+            normalizer = fit_multiview_normalizer(raw_train_ds)
         train_ds = PhysicsCacheDataset(cache, set(split.train_subjects), normalizer=normalizer)
         val_ds = PhysicsCacheDataset(cache, set(split.val_subjects), normalizer=normalizer)
         test_ds = PhysicsCacheDataset(cache, set(split.test_subjects), normalizer=normalizer)
         train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate_patient_batch)
         val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_patient_batch)
         test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_patient_batch)
-        model = PGCSEEGModel(**_model_kwargs(args.experiment_name, args.model_dim)).to(device)
-        if args.task1_checkpoint and args.task1_checkpoint.exists():
-            payload = torch.load(args.task1_checkpoint, map_location=device)
-            state = payload.get("model_state_dict", payload)
+        model_kwargs = model_kwargs_for_experiment(args.experiment_name, args.model_dim)
+        model = PGCSEEGModel(**model_kwargs).to(device)
+        if task1_payload is not None:
+            state = task1_payload.get("model_state_dict", task1_payload)
             model.load_state_dict(state, strict=False)
         if args.freeze_backbone:
             _freeze_backbone(model)
@@ -156,8 +228,14 @@ def main() -> None:
     summary = summarize_task2_predictions([row["success_failure"] for row in pred_rows], [row["outcome_prob"] for row in pred_rows])
     (args.output_dir / "summary_metrics.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     if best_state is not None:
-        torch.save({"model_state_dict": best_state, "experiment_name": args.experiment_name}, args.output_dir / "best_checkpoint.pt")
-        torch.save({"model_state_dict": best_state, "experiment_name": args.experiment_name}, args.output_dir / "best_task2_outcome.pt")
+        payload = {
+            "model_state_dict": best_state,
+            "experiment_name": args.experiment_name,
+            "model_kwargs": model_kwargs_for_experiment(args.experiment_name, args.model_dim),
+            "checkpoint_scope": "task2_global_best",
+        }
+        torch.save(payload, args.output_dir / "best_checkpoint.pt")
+        torch.save(payload, args.output_dir / "best_task2_outcome.pt")
 
 
 if __name__ == "__main__":

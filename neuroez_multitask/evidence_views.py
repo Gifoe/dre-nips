@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Sequence
 
 import numpy as np
 
@@ -18,7 +18,7 @@ B0_FEATURE_NAMES = [
     "spectral_entropy",
 ]
 
-PHYSICS_FEATURE_NAMES = [
+PHYSICS_PROXY_FEATURE_NAMES = [
     "ei_slope",
     "ei_offset",
     "hfo_rate",
@@ -26,6 +26,39 @@ PHYSICS_FEATURE_NAMES = [
     "pac_theta_gamma",
     "local_synchrony",
 ]
+
+PHYSICS_STRICT_FEATURE_NAMES = [
+    "ei_slope",
+    "ei_offset",
+    "ei_r2",
+    "ei_fit_error",
+    "ripple_rate",
+    "ripple_amplitude_mean",
+    "ripple_amplitude_max",
+    "fast_ripple_rate",
+    "fast_ripple_amplitude_mean",
+    "fast_ripple_amplitude_max",
+    "hfo_artifact_ratio",
+    "pac_theta_low_gamma",
+    "pac_theta_high_gamma",
+    "pac_alpha_low_gamma",
+    "pac_alpha_high_gamma",
+    "local_synchrony",
+]
+
+PHYSICS_FEATURE_NAMES = PHYSICS_PROXY_FEATURE_NAMES
+
+CAUSAL_GRAPH_ALGORITHM = "tfccm_lite_nearest_neighbor_cross_mapping"
+CAUSAL_GRAPH_WARNING = (
+    "This is a simplified TFCCM-lite implementation using fixed embedding, "
+    "two library fractions, and best-lag cross-map score. It is not a full "
+    "surrogate-tested TFCCM implementation."
+)
+PHYSICS_FEATURE_LEVEL = "physics_proxy_v1"
+PHYSICS_FEATURE_WARNING = (
+    "E/I slope, HFO, PAC, and local synchrony are lightweight EDF-derived proxies in v1. "
+    "They should not be reported as fully validated clinical biomarkers."
+)
 
 CAUSAL_NODE_FEATURE_NAMES = [
     "out_strength",
@@ -309,7 +342,7 @@ def _cross_map_skill(
     return corr if np.isfinite(corr) else 0.0
 
 
-def compute_tfccm_graph(
+def compute_tfccm_lite_graph(
     segment: np.ndarray,
     sfreq: float,
     max_delay_ms: float = 80.0,
@@ -356,6 +389,10 @@ def compute_tfccm_graph(
             adj[src, dst] = best
             delay[src, dst] = best_lag / max(float(sfreq), 1e-6)
     return np.nan_to_num(adj, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32), delay.astype(np.float32)
+
+
+def compute_tfccm_graph(*args: Any, **kwargs: Any) -> tuple[np.ndarray, np.ndarray]:
+    return compute_tfccm_lite_graph(*args, **kwargs)
 
 
 def compute_causal_node_features(adjacency: np.ndarray, delay: np.ndarray) -> np.ndarray:

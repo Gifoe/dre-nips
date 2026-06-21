@@ -4,6 +4,7 @@ import numpy as np
 
 from scripts.build_physics_window_cache import build_cache_payload
 from scripts.inspect_physics_cache import inspect_cache_payload
+from neuroez_multitask.evidence_views import PHYSICS_STRICT_FEATURE_NAMES
 
 
 def _patient():
@@ -59,3 +60,24 @@ def test_physics_cache_payload_contains_required_shapes():
     assert sample["topology_graph_features"].ndim == 2
     assert sample["window_relative_centers_sec"].shape[0] == sample["window_features"].shape[0]
     assert sample["window_mask"].shape[0] == sample["window_features"].shape[0]
+
+
+def test_strict_physics_cache_records_v2_feature_names_and_shapes():
+    payload = build_cache_payload(
+        [_patient()],
+        source_patient_records_pkl="synthetic.pkl",
+        window_length_sec=0.5,
+        window_step_sec=0.5,
+        pre_onset_sec=1.0,
+        post_onset_sec=1.0,
+        physics_mode="strict",
+    )
+
+    report = inspect_cache_payload(payload)
+    sample = payload["run_records"][0]["sample"]
+
+    assert report["usable_physics_cache"] is True
+    assert report["physics_mode"] == "strict"
+    assert report["physics_feature_level"] == "physics_strict_v2"
+    assert report["feature_names"]["physics"] == PHYSICS_STRICT_FEATURE_NAMES
+    assert sample["physics_node_features"].shape[-1] == len(PHYSICS_STRICT_FEATURE_NAMES)

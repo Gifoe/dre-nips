@@ -27,6 +27,7 @@ def _shape(value: Any) -> list[int]:
 
 def inspect_cache_payload(payload: dict[str, Any]) -> dict[str, Any]:
     errors: list[str] = []
+    warnings: list[str] = []
     run_records = payload.get("run_records")
     patient_index = payload.get("patient_index")
     outcome_index = payload.get("outcome_index")
@@ -39,6 +40,15 @@ def inspect_cache_payload(payload: dict[str, Any]) -> dict[str, Any]:
         errors.append("outcome_index is missing")
     if not isinstance(cache_meta, dict):
         errors.append("cache_meta is missing")
+        cache_meta = {}
+    if isinstance(cache_meta, dict):
+        if not cache_meta.get("causal_graph_algorithm"):
+            warnings.append("causal_graph_algorithm missing")
+        if not cache_meta.get("physics_feature_level"):
+            warnings.append("physics_feature_level missing")
+        for key in ("feature_names_b0", "feature_names_physics", "feature_names_causal_node", "feature_names_topology"):
+            if key not in cache_meta:
+                warnings.append(f"{key} missing")
     shapes: dict[str, list[int]] = {}
     if isinstance(run_records, list) and run_records:
         sample = run_records[0].get("sample", {})
@@ -46,6 +56,9 @@ def inspect_cache_payload(payload: dict[str, Any]) -> dict[str, Any]:
             if key not in sample:
                 errors.append(f"first sample missing {key}")
             else:
+                shapes[key] = _shape(sample[key])
+        for key in ("tfccm_pvalue", "tfccm_convergence"):
+            if key in sample:
                 shapes[key] = _shape(sample[key])
         if "window_features" in sample:
             t, c = np.asarray(sample["window_features"]).shape[:2]
@@ -65,15 +78,43 @@ def inspect_cache_payload(payload: dict[str, Any]) -> dict[str, Any]:
             valid = labels >= 0.0
             if np.any(valid) and not np.allclose(labels_ez[valid], 1.0 - labels_nez[valid]):
                 errors.append(f"{sid}: labels_ez is not derived from labels_nez")
+    meta = cache_meta if isinstance(cache_meta, dict) else {}
+    feature_names = {
+        "b0": list(meta.get("feature_names_b0", [])),
+        "physics": list(meta.get("feature_names_physics", [])),
+        "causal_node": list(meta.get("feature_names_causal_node", [])),
+        "topology": list(meta.get("feature_names_topology", [])),
+    }
+    feature_dims: dict[str, int | None] = {
+        "b0": shapes.get("window_features", [None, None, None])[-1],
+        "physics": shapes.get("physics_node_features", [None, None, None])[-1],
+        "causal_node": shapes.get("causal_node_features", [None, None, None])[-1],
+        "topology": shapes.get("topology_graph_features", [None, None])[-1],
+    }
+    if feature_names["physics"] and feature_dims["physics"] is not None and len(feature_names["physics"]) != feature_dims["physics"]:
+        warnings.append("physics feature names length does not match physics feature dim")
+    if feature_names["topology"] and feature_dims["topology"] is not None and len(feature_names["topology"]) != feature_dims["topology"]:
+        warnings.append("topology feature names length does not match topology feature dim")
+
     return {
         "usable_physics_cache": not errors,
+        "cache_version": meta.get("cache_version"),
+        "cache_name": meta.get("cache_name"),
+        "label_semantics": meta.get("label_semantics"),
+        "physics_mode": meta.get("physics_mode"),
+        "causal_graph_algorithm": meta.get("causal_graph_algorithm"),
+        "physics_feature_level": meta.get("physics_feature_level"),
         "counts": {
             "run_records": len(run_records) if isinstance(run_records, list) else 0,
             "patients": len(patient_index) if isinstance(patient_index, dict) else 0,
             "outcomes": len(outcome_index) if isinstance(outcome_index, dict) else 0,
         },
+        "feature_dims": feature_dims,
+        "feature_names": feature_names,
+        "sample_shapes": shapes,
         "shapes": shapes,
-        "cache_meta": cache_meta if isinstance(cache_meta, dict) else {},
+        "cache_meta": meta,
+        "warnings": warnings,
         "errors": errors,
     }
 

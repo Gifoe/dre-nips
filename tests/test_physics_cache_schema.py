@@ -43,6 +43,9 @@ def test_physics_cache_payload_contains_required_shapes():
         window_step_sec=0.5,
         pre_onset_sec=1.0,
         post_onset_sec=1.0,
+        physics_mode="proxy",
+        causal_graph_mode="tfccm_lite",
+        topology_mode="simple",
     )
 
     report = inspect_cache_payload(payload)
@@ -71,6 +74,8 @@ def test_strict_physics_cache_records_v2_feature_names_and_shapes():
         pre_onset_sec=1.0,
         post_onset_sec=1.0,
         physics_mode="strict",
+        causal_graph_mode="tfccm_lite",
+        topology_mode="simple",
     )
 
     report = inspect_cache_payload(payload)

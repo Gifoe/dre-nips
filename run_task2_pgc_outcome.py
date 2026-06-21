@@ -20,6 +20,14 @@ from neuroez_multitask.train_task2 import estimate_task2_pos_weight, task2_loss
 from run_task1_pgc_ez import _checkpoint_state_dict, _write_split_metadata
 
 
+def _model_kwargs(experiment_name: str, model_dim: int, *, cache_meta: dict[str, Any] | None = None) -> dict[str, Any]:
+    kwargs = model_kwargs_for_experiment(experiment_name, model_dim)
+    feature_names = (cache_meta or {}).get("feature_names_topology")
+    if isinstance(feature_names, list) and feature_names:
+        kwargs["topology_dim"] = len(feature_names)
+    return kwargs
+
+
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames: list[str] = []
@@ -183,7 +191,7 @@ def main() -> None:
         train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate_patient_batch)
         val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_patient_batch)
         test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_patient_batch)
-        model_kwargs = model_kwargs_for_experiment(args.experiment_name, args.model_dim)
+        model_kwargs = _model_kwargs(args.experiment_name, args.model_dim, cache_meta=cache.get("cache_meta", {}))
         model = PGCSEEGModel(**model_kwargs).to(device)
         if task1_payload is not None:
             state = task1_payload.get("model_state_dict", task1_payload)
@@ -231,7 +239,7 @@ def main() -> None:
         payload = {
             "model_state_dict": best_state,
             "experiment_name": args.experiment_name,
-            "model_kwargs": model_kwargs_for_experiment(args.experiment_name, args.model_dim),
+            "model_kwargs": _model_kwargs(args.experiment_name, args.model_dim, cache_meta=cache.get("cache_meta", {})),
             "checkpoint_scope": "task2_global_best",
         }
         torch.save(payload, args.output_dir / "best_checkpoint.pt")

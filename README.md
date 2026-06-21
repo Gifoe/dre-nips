@@ -45,6 +45,84 @@ The current v1 causal graph is TFCCM-lite, not a full surrogate-tested TFCCM
 implementation. The current v1 physics features are lightweight EDF-derived
 proxies, not fully validated clinical biomarkers.
 
+## PGC-SEEG-Final
+
+Final cache mode:
+
+```text
+physics_mode = strict
+causal_graph_mode = tfccm_full
+topology_mode = full
+```
+
+The final cache uses:
+
+* strict EDF-derived physics features
+* full TFCCM graph with multi-library convergence and surrogate p-value
+* full topology trajectory features
+* optional Sinkhorn trajectory if a structural cost matrix is provided
+
+Debug cache mode:
+
+```text
+physics_mode = proxy
+causal_graph_mode = tfccm_lite
+topology_mode = simple
+```
+
+Build the final cache:
+
+```powershell
+python .\scripts\build_physics_window_cache.py `
+  --patient_records_pkl D:\nips-temp\pgc\patient_records.pkl `
+  --output_cache D:\nips-temp\physics_cache\all_window_cache_physics_final.pkl `
+  --physics-mode strict `
+  --causal-graph-mode tfccm_full `
+  --topology-mode full `
+  --tfccm-n-surrogates 20 `
+  --tfccm-alpha 0.05 `
+  --tfccm-max-points 128 `
+  --line-noise-hz 50
+```
+
+Build the final cache with Sinkhorn topology trajectory features:
+
+```powershell
+python .\scripts\build_physics_window_cache.py `
+  --patient_records_pkl D:\nips-temp\pgc\patient_records.pkl `
+  --output_cache D:\nips-temp\physics_cache\all_window_cache_physics_final_sinkhorn.pkl `
+  --physics-mode strict `
+  --causal-graph-mode tfccm_full `
+  --topology-mode full `
+  --enable-sinkhorn `
+  --structural-cost-matrix-dir D:\data\structural_cost
+```
+
+Train Task1 on the final cache:
+
+```powershell
+python .\run_task1_pgc_ez.py `
+  --window_cache_path D:\nips-temp\physics_cache\all_window_cache_physics_final.pkl `
+  --experiment_name T1_FULL_PGC `
+  --output_dir D:\nips-temp\pgc_final\task1_full `
+  --split_strategy 5fold `
+  --n_splits 5
+```
+
+Train Task2 on the final cache. Task2 must use the fold-specific Task1
+checkpoint directory:
+
+```powershell
+python .\run_task2_pgc_outcome.py `
+  --window_cache_path D:\nips-temp\physics_cache\all_window_cache_physics_final.pkl `
+  --task1_checkpoint_dir D:\nips-temp\pgc_final\task1_full `
+  --experiment_name T2_FULL_ATTENTION_TOPOLOGY `
+  --output_dir D:\nips-temp\pgc_final\task2_full `
+  --split_strategy 5fold `
+  --n_splits 5 `
+  --freeze_backbone true
+```
+
 ## v2 Strict Physics Mode
 
 The cache builder also supports a v2 strict-physics cache:
@@ -54,6 +132,8 @@ python .\scripts\build_physics_window_cache.py `
   --patient_records_pkl D:\nips-temp\pgc\patient_records.pkl `
   --output_cache D:\nips-temp\physics_cache\all_window_cache_physics_v2.pkl `
   --physics-mode strict `
+  --causal-graph-mode tfccm_lite `
+  --topology-mode simple `
   --line-noise-hz 50
 ```
 
@@ -79,7 +159,10 @@ python .\scripts\inspect_patient_records.py `
 
 python .\scripts\build_physics_window_cache.py `
   --patient_records_pkl D:\nips-temp\pgc\patient_records.pkl `
-  --output_cache D:\nips-temp\physics_cache\all_window_cache_physics_v1.pkl
+  --output_cache D:\nips-temp\physics_cache\all_window_cache_physics_v1.pkl `
+  --physics-mode proxy `
+  --causal-graph-mode tfccm_lite `
+  --topology-mode simple
 
 python .\scripts\inspect_physics_cache.py `
   --cache-path D:\nips-temp\physics_cache\all_window_cache_physics_v1.pkl

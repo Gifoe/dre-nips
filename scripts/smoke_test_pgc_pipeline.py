@@ -151,6 +151,13 @@ def main() -> None:
             pre_onset_sec=1.0,
             post_onset_sec=1.0,
             physics_mode="strict",
+            causal_graph_mode="tfccm_full",
+            topology_mode="full",
+            tfccm_embedding_dims=(2,),
+            tfccm_taus=(1,),
+            tfccm_library_fractions=(0.5, 1.0),
+            tfccm_n_surrogates=0,
+            tfccm_max_points=64,
         )
         strict_cache_path = root / "toy_cache_strict.pkl"
         with open(strict_cache_path, "wb") as fout:

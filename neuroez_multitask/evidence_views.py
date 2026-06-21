@@ -5,6 +5,8 @@ from typing import Any, Iterable, Sequence
 
 import numpy as np
 
+from .topology_features import TOPOLOGY_SIMPLE_FEATURE_NAMES
+
 
 B0_FEATURE_NAMES = [
     "log_bp_delta",
@@ -72,16 +74,7 @@ CAUSAL_NODE_FEATURE_NAMES = [
 
 SELF_REFERENCE_PARTS = ("abs", "delta", "zdelta", "ratio")
 
-TOPOLOGY_FEATURE_NAMES = [
-    "causal_density_mean",
-    "causal_density_std",
-    "source_concentration",
-    "sink_concentration",
-    "driver_entropy",
-    "hwc_mean",
-    "hwc_std",
-    "hwc_slope",
-]
+TOPOLOGY_FEATURE_NAMES = TOPOLOGY_SIMPLE_FEATURE_NAMES
 
 
 @dataclass(frozen=True)

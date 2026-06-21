@@ -198,6 +198,9 @@ def test_cache_meta_and_inspector_mark_v1_proxy_lite_status():
         window_step_sec=0.5,
         pre_onset_sec=1.0,
         post_onset_sec=1.0,
+        physics_mode="proxy",
+        causal_graph_mode="tfccm_lite",
+        topology_mode="simple",
     )
 
     report = inspect_cache_payload(payload)

@@ -35,6 +35,9 @@ def test_cache_preserves_nez_positive_labels_and_derives_ez_labels():
         window_step_sec=0.5,
         pre_onset_sec=1.0,
         post_onset_sec=1.0,
+        physics_mode="proxy",
+        causal_graph_mode="tfccm_lite",
+        topology_mode="simple",
     )
 
     entry = payload["patient_index"]["lzu:p1"]

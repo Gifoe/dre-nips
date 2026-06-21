@@ -21,8 +21,12 @@ from neuroez_multitask.splits import PatientSplit, make_patient_splits
 from neuroez_multitask.train_task1 import task1_loss, task1_prediction_rows
 
 
-def _model_kwargs(experiment_name: str, model_dim: int) -> dict[str, Any]:
-    return model_kwargs_for_experiment(experiment_name, model_dim)
+def _model_kwargs(experiment_name: str, model_dim: int, *, cache_meta: dict[str, Any] | None = None) -> dict[str, Any]:
+    kwargs = model_kwargs_for_experiment(experiment_name, model_dim)
+    feature_names = (cache_meta or {}).get("feature_names_topology")
+    if isinstance(feature_names, list) and feature_names:
+        kwargs["topology_dim"] = len(feature_names)
+    return kwargs
 
 
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -212,7 +216,7 @@ def main() -> None:
         train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate_patient_batch)
         val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_patient_batch)
         test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_patient_batch)
-        model_kwargs = model_kwargs_for_experiment(args.experiment_name, args.model_dim)
+        model_kwargs = _model_kwargs(args.experiment_name, args.model_dim, cache_meta=cache.get("cache_meta", {}))
         model = PGCSEEGModel(**model_kwargs).to(device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
         best_fold_state = None
@@ -271,7 +275,7 @@ def main() -> None:
         global_payload = {
             "model_state_dict": best_state,
             "experiment_name": args.experiment_name,
-            "model_kwargs": model_kwargs_for_experiment(args.experiment_name, args.model_dim),
+            "model_kwargs": _model_kwargs(args.experiment_name, args.model_dim, cache_meta=cache.get("cache_meta", {})),
             "checkpoint_scope": "global_best_debug_only",
             "safe_for_task2_fold_loading": False,
             "not_for_task2_fold_evaluation": True,

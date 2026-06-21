@@ -3,10 +3,16 @@ from __future__ import annotations
 import argparse
 import json
 import pickle
+import sys
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from neuroez_multitask.evidence_views import PHYSICS_STRICT_FEATURE_NAMES
+from neuroez_multitask.topology_features import TOPOLOGY_FULL_FEATURE_NAMES
 
 
 REQUIRED_SAMPLE_KEYS = [
@@ -49,7 +55,7 @@ def inspect_cache_payload(payload: dict[str, Any]) -> dict[str, Any]:
         for key in ("feature_names_b0", "feature_names_physics", "feature_names_causal_node", "feature_names_topology"):
             if key not in cache_meta:
                 warnings.append(f"{key} missing")
-    shapes: dict[str, list[int]] = {}
+    shapes: dict[str, Any] = {}
     if isinstance(run_records, list) and run_records:
         sample = run_records[0].get("sample", {})
         for key in REQUIRED_SAMPLE_KEYS:
@@ -60,6 +66,8 @@ def inspect_cache_payload(payload: dict[str, Any]) -> dict[str, Any]:
         for key in ("tfccm_pvalue", "tfccm_convergence"):
             if key in sample:
                 shapes[key] = _shape(sample[key])
+            else:
+                shapes[key] = "missing"
         if "window_features" in sample:
             t, c = np.asarray(sample["window_features"]).shape[:2]
             for key in ("physics_node_features", "causal_node_features"):
@@ -95,15 +103,51 @@ def inspect_cache_payload(payload: dict[str, Any]) -> dict[str, Any]:
         warnings.append("physics feature names length does not match physics feature dim")
     if feature_names["topology"] and feature_dims["topology"] is not None and len(feature_names["topology"]) != feature_dims["topology"]:
         warnings.append("topology feature names length does not match topology feature dim")
+    physics_mode = meta.get("physics_mode")
+    causal_graph_mode = meta.get("causal_graph_mode")
+    topology_mode = meta.get("topology_mode")
+    if causal_graph_mode == "tfccm_full" and shapes.get("tfccm_pvalue") == "missing":
+        warnings.append("causal_graph_mode=tfccm_full but tfccm_pvalue missing")
+    if causal_graph_mode == "tfccm_full" and shapes.get("tfccm_convergence") == "missing":
+        warnings.append("causal_graph_mode=tfccm_full but tfccm_convergence missing")
+    if topology_mode == "full" and feature_dims["topology"] != len(TOPOLOGY_FULL_FEATURE_NAMES):
+        warnings.append(
+            f"topology_mode=full but topology dim mismatch: expected {len(TOPOLOGY_FULL_FEATURE_NAMES)}, got {feature_dims['topology']}"
+        )
+    if physics_mode == "strict" and feature_dims["physics"] != len(PHYSICS_STRICT_FEATURE_NAMES):
+        warnings.append(
+            f"physics_mode=strict but physics dim mismatch: expected {len(PHYSICS_STRICT_FEATURE_NAMES)}, got {feature_dims['physics']}"
+        )
+    center_distribution: dict[str, int] = {}
+    if isinstance(patient_index, dict):
+        for entry in patient_index.values():
+            center = str(entry.get("center", "unknown"))
+            center_distribution[center] = center_distribution.get(center, 0) + 1
+    outcome_distribution: dict[str, int] = {}
+    num_patients_with_outcome = 0
+    if isinstance(outcome_index, dict):
+        for entry in outcome_index.values():
+            outcome = entry.get("success_failure")
+            if outcome is not None:
+                num_patients_with_outcome += 1
+            key = "missing" if outcome is None else str(int(bool(outcome)))
+            outcome_distribution[key] = outcome_distribution.get(key, 0) + 1
 
     return {
         "usable_physics_cache": not errors,
         "cache_version": meta.get("cache_version"),
         "cache_name": meta.get("cache_name"),
         "label_semantics": meta.get("label_semantics"),
-        "physics_mode": meta.get("physics_mode"),
+        "physics_mode": physics_mode,
+        "causal_graph_mode": causal_graph_mode,
+        "topology_mode": topology_mode,
         "causal_graph_algorithm": meta.get("causal_graph_algorithm"),
         "physics_feature_level": meta.get("physics_feature_level"),
+        "num_patients": len(patient_index) if isinstance(patient_index, dict) else 0,
+        "num_runs": len(run_records) if isinstance(run_records, list) else 0,
+        "num_patients_with_outcome": num_patients_with_outcome,
+        "center_distribution": center_distribution,
+        "outcome_distribution": outcome_distribution,
         "counts": {
             "run_records": len(run_records) if isinstance(run_records, list) else 0,
             "patients": len(patient_index) if isinstance(patient_index, dict) else 0,

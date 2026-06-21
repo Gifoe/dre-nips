@@ -1,0 +1,35 @@
+source: four-center-raw
+
+centers:
+  - lzu
+  - hup
+  - multicenter
+  - pediatric
+
+feature_bank_output_dir: D:\nips-temp\biodynformer_preictal_feature_bank
+
+roots:
+  lzu: F:\兰大二院新SEEG数据
+  hup: E:\DRE-nips\dataest
+  multicenter: E:\DRE-nips\dataest
+  pediatric: F:\儿科医院SEEG整理汇总
+
+metadata:
+  lzu_ez_annotations_path: F:\兰大二院新SEEG数据\label-seeg_with_engel.xlsx
+  lzu_seizure_times_path: F:\兰大二院新SEEG数据\SEEG数据分析时间标签.xlsx
+  multicenter_participants_path: E:\DRE-nips\dataest\participants-muticenter.tsv
+  pediatric_metadata_path: F:\儿科医院SEEG整理汇总\pediatric_ez_channels_final.xlsx
+
+quality_reports:
+  root: F:\儿科医院SEEG整理汇总
+  lzu: F:\儿科医院SEEG整理汇总\slope_quality_report_en1修改.xlsx
+  hup: F:\儿科医院SEEG整理汇总\slope_quality_report_HUP_S.xlsx
+  multicenter: F:\儿科医院SEEG整理汇总\slope_quality_report_ds3029_S.xlsx
+  pediatric: F:\儿科医院SEEG整理汇总\儿科数据分类.xlsx
+
+quality:
+  enabled: true
+  keep_ratings: GOOD,REVIEW
+  drop_ratings: POOR
+  missing_policy: drop
+  strict_reports: true

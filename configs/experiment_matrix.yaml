@@ -1,0 +1,17 @@
+versions:
+  - v1
+  - v2
+  - final
+tasks:
+  - task1
+  - task2
+validation:
+  run_5fold: true
+  run_loco: true
+  n_splits: 5
+  seed: 42
+training:
+  resume: true
+  max_epochs: 50
+  learning_rate: 0.05
+  ssl_mask_fraction: 0.15

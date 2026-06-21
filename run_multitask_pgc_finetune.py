@@ -13,10 +13,11 @@ from torch.utils.data import DataLoader
 from neuroez_multitask.dataset import PhysicsCacheDataset, collate_patient_batch
 from neuroez_multitask.metrics import summarize_task1_predictions, summarize_task2_predictions
 from neuroez_multitask.model import PGCSEEGModel
+from neuroez_multitask.normalization import fit_multiview_normalizer
 from neuroez_multitask.splits import make_patient_splits
 from neuroez_multitask.train_task1 import task1_loss, task1_prediction_rows
-from neuroez_multitask.train_task2 import task2_loss
-from run_task1_pgc_ez import _model_kwargs
+from neuroez_multitask.train_task2 import estimate_task2_pos_weight, task2_loss
+from run_task1_pgc_ez import _checkpoint_state_dict, _model_kwargs
 
 
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -131,21 +132,28 @@ def main() -> None:
     best_state = None
     best_score = -1.0
     for split in splits:
-        train_ds = PhysicsCacheDataset(cache, set(split.train_subjects))
-        test_ds = PhysicsCacheDataset(cache, set(split.test_subjects))
+        raw_train_ds = PhysicsCacheDataset(cache, set(split.train_subjects))
+        normalizer = fit_multiview_normalizer(raw_train_ds)
+        train_ds = PhysicsCacheDataset(cache, set(split.train_subjects), normalizer=normalizer)
+        test_ds = PhysicsCacheDataset(cache, set(split.test_subjects), normalizer=normalizer)
         train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate_patient_batch)
         test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_patient_batch)
         model = PGCSEEGModel(**_model_kwargs(args.experiment_name, args.model_dim)).to(device)
         _load_checkpoint(model, args.task1_checkpoint, device)
         _load_checkpoint(model, args.task2_checkpoint, device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+        pos_weight = estimate_task2_pos_weight(cache, split.train_subjects).to(device)
         for _ in range(max(args.epochs, 0)):
             model.train()
             for batch in train_loader:
                 tensor_batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
                 optimizer.zero_grad(set_to_none=True)
                 outputs = model(tensor_batch)
-                loss = task1_loss(outputs, tensor_batch) + float(args.lambda_outcome) * task2_loss(outputs, tensor_batch)
+                loss = task1_loss(outputs, tensor_batch) + float(args.lambda_outcome) * task2_loss(
+                    outputs,
+                    tensor_batch,
+                    pos_weight=pos_weight,
+                )
                 loss.backward()
                 optimizer.step()
         metrics, rows1, rows2 = _evaluate(model, test_loader, device, split.fold, cache)
@@ -155,7 +163,7 @@ def main() -> None:
         score = float(metrics.get("task1_AUPRC", 0.0)) + float(args.lambda_outcome) * float(metrics.get("task2_AUPRC", 0.0))
         if score > best_score:
             best_score = score
-            best_state = model.state_dict()
+            best_state = _checkpoint_state_dict(model)
     _write_csv(args.output_dir / "fold_metrics.csv", fold_rows)
     _write_csv(args.output_dir / "task1_patient_predictions.csv", task1_rows)
     _write_csv(args.output_dir / "task2_patient_predictions.csv", task2_rows)

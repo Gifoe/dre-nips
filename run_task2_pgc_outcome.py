@@ -13,9 +13,10 @@ from torch.utils.data import DataLoader
 from neuroez_multitask.dataset import PhysicsCacheDataset, collate_patient_batch
 from neuroez_multitask.metrics import summarize_task2_predictions
 from neuroez_multitask.model import PGCSEEGModel
+from neuroez_multitask.normalization import fit_multiview_normalizer
 from neuroez_multitask.splits import make_patient_splits
-from neuroez_multitask.train_task2 import task2_loss
-from run_task1_pgc_ez import _model_kwargs
+from neuroez_multitask.train_task2 import estimate_task2_pos_weight, task2_loss
+from run_task1_pgc_ez import _checkpoint_state_dict, _model_kwargs
 
 
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -70,6 +71,10 @@ def _evaluate(model: PGCSEEGModel, loader: DataLoader, device: torch.device, fol
     return summarize_task2_predictions(labels, probs), rows
 
 
+def _metric_score(metrics: dict[str, float]) -> float:
+    return float(metrics.get("AUPRC", 0.0))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train Task2 PGC-SEEG outcome model.")
     parser.add_argument("--window_cache_path", type=Path, required=True)
@@ -83,6 +88,7 @@ def main() -> None:
     parser.add_argument("--model_dim", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--freeze_backbone", type=lambda x: str(x).lower() in {"1", "true", "yes"}, default=True)
+    parser.add_argument("--patience", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     torch.manual_seed(args.seed)
@@ -97,9 +103,13 @@ def main() -> None:
     best_state = None
     best_score = -1.0
     for split in splits:
-        train_ds = PhysicsCacheDataset(cache, set(split.train_subjects))
-        test_ds = PhysicsCacheDataset(cache, set(split.test_subjects))
+        raw_train_ds = PhysicsCacheDataset(cache, set(split.train_subjects))
+        normalizer = fit_multiview_normalizer(raw_train_ds)
+        train_ds = PhysicsCacheDataset(cache, set(split.train_subjects), normalizer=normalizer)
+        val_ds = PhysicsCacheDataset(cache, set(split.val_subjects), normalizer=normalizer)
+        test_ds = PhysicsCacheDataset(cache, set(split.test_subjects), normalizer=normalizer)
         train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate_patient_batch)
+        val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_patient_batch)
         test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_patient_batch)
         model = PGCSEEGModel(**_model_kwargs(args.experiment_name, args.model_dim)).to(device)
         if args.task1_checkpoint and args.task1_checkpoint.exists():
@@ -109,21 +119,38 @@ def main() -> None:
         if args.freeze_backbone:
             _freeze_backbone(model)
         optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr)
+        pos_weight = estimate_task2_pos_weight(cache, split.train_subjects).to(device)
+        best_fold_state = None
+        best_fold_score = -1.0
+        bad_epochs = 0
+        selection_loader = val_loader if len(val_ds) > 0 else train_loader
         for _ in range(max(args.epochs, 0)):
             model.train()
             for batch in train_loader:
                 tensor_batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
                 optimizer.zero_grad(set_to_none=True)
-                loss = task2_loss(model(tensor_batch), tensor_batch)
+                loss = task2_loss(model(tensor_batch), tensor_batch, pos_weight=pos_weight)
                 loss.backward()
                 optimizer.step()
+            val_metrics, _ = _evaluate(model, selection_loader, device, split.fold, cache)
+            val_score = _metric_score(val_metrics)
+            if val_score > best_fold_score:
+                best_fold_score = val_score
+                best_fold_state = _checkpoint_state_dict(model)
+                bad_epochs = 0
+            else:
+                bad_epochs += 1
+                if bad_epochs >= max(int(args.patience), 1):
+                    break
+        if best_fold_state is not None:
+            model.load_state_dict(best_fold_state, strict=False)
         metrics, rows = _evaluate(model, test_loader, device, split.fold, cache)
         fold_rows.append({"fold": split.fold, **metrics})
         pred_rows.extend(rows)
-        score = float(metrics.get("AUPRC", 0.0))
+        score = best_fold_score if best_fold_score >= 0.0 else _metric_score(metrics)
         if score > best_score:
             best_score = score
-            best_state = model.state_dict()
+            best_state = _checkpoint_state_dict(model)
     _write_csv(args.output_dir / "fold_metrics.csv", fold_rows)
     _write_csv(args.output_dir / "patient_predictions.csv", pred_rows)
     summary = summarize_task2_predictions([row["success_failure"] for row in pred_rows], [row["outcome_prob"] for row in pred_rows])

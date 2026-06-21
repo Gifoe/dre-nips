@@ -24,6 +24,8 @@ class PGCSEEGModel(nn.Module):
         directed_graph: bool = True,
         random_graph: bool = False,
         fusion_type: str = "gated",
+        outcome_readout_type: str = "attention",
+        use_topology_features: bool = True,
     ) -> None:
         super().__init__()
         self.model_dim = model_dim
@@ -40,8 +42,15 @@ class PGCSEEGModel(nn.Module):
             random_graph=random_graph,
         )
         self.causal_node_projection = nn.LazyLinear(model_dim)
+        self.causal_node_gate = nn.Sequential(nn.Linear(model_dim * 2, model_dim), nn.GELU(), nn.Linear(model_dim, model_dim))
         self.ez_head = EZHead(input_dim=model_dim * 2, dropout=dropout)
-        self.outcome_head = LearnedOutcomeAttentionReadout(embedding_dim=model_dim * 2, topology_dim=topology_dim, dropout=dropout)
+        self.outcome_head = LearnedOutcomeAttentionReadout(
+            embedding_dim=model_dim * 2,
+            topology_dim=topology_dim,
+            dropout=dropout,
+            readout_type=outcome_readout_type,
+            use_topology_features=use_topology_features,
+        )
 
     def _temporal_pool(self, h: torch.Tensor, window_mask: torch.Tensor) -> torch.Tensor:
         mask = window_mask[:, :, :, None].expand(h.shape[0], h.shape[1], h.shape[2], h.shape[3])
@@ -58,18 +67,19 @@ class PGCSEEGModel(nn.Module):
         if self.use_physics_branch:
             h_phys = self.physics_encoder(batch["physics_features"].float())
             h = self.physics_fusion(h, h_phys)
+        causal_node_projected = torch.zeros_like(h)
+        if self.use_causal_node_features:
+            causal_node_projected = self.causal_node_projection(batch["causal_node_features"].float())
         if self.use_causal_graph:
-            causal_node = batch["causal_node_features"].float()
-            if self.use_causal_node_features:
-                causal_node_projected = self.causal_node_projection(causal_node)
-            else:
-                causal_node_projected = torch.zeros_like(h)
             h = self.causal_graph_encoder(
                 h,
                 batch["causal_adjacency"].float(),
                 batch["causal_delay"].float(),
                 causal_node_projected,
             )
+        elif self.use_causal_node_features:
+            gate = torch.sigmoid(self.causal_node_gate(torch.cat([h, causal_node_projected], dim=-1)))
+            h = h + gate * causal_node_projected
         seizure_channel_embedding = self._temporal_pool(h, batch["window_mask"].bool())
         patient_channel_embedding = self._seizure_aggregate(
             seizure_channel_embedding,
